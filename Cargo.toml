@@ -1,6 +1,6 @@
 [package]
 name = "epub_tool_core"
-version = "0.1.0"
+version = "26.8.25"
 description = "Platform-independent EPUB processing engine for Epub Tool"
 authors = ["cnwxi"]
 edition = "2021"
