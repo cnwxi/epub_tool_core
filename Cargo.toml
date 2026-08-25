@@ -1,0 +1,58 @@
+[package]
+name = "epub_tool_core"
+version = "0.1.0"
+description = "Platform-independent EPUB processing engine for Epub Tool"
+authors = ["cnwxi"]
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/cnwxi/epub_tool_core"
+readme = "README.md"
+
+[features]
+default = ["font"]
+font = [
+    "dep:blitz-dom",
+    "dep:blitz-html",
+    "dep:blitz-traits",
+    "dep:dom_query",
+    "dep:fontdue",
+    "dep:icu_properties",
+    "dep:ndarray",
+    "dep:ort",
+    "dep:rand",
+    "dep:sha1",
+    "dep:serde_json",
+    "dep:style",
+    "dep:ttf-parser",
+    "dep:woff",
+    "dep:write-fonts",
+]
+
+[dependencies]
+encoding_rs = "0.8"
+image = { version = "0.25.5", default-features = false, features = ["bmp", "jpeg", "png", "webp"] }
+percent-encoding = "2.3"
+png = "0.18"
+regex = "1.12"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", optional = true }
+webp = "0.3"
+zip = { version = "2.2", default-features = false, features = ["deflate"] }
+
+blitz-dom = { version = "=0.3.0-beta.1", default-features = false, optional = true }
+blitz-html = { version = "=0.3.0-beta.1", default-features = false, optional = true }
+blitz-traits = { version = "=0.3.0-beta.1", optional = true }
+dom_query = { version = "0.27", default-features = false, optional = true }
+fontdue = { version = "0.9", optional = true }
+icu_properties = { version = "2.2", optional = true }
+ndarray = { version = "0.17", optional = true }
+ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "api-24"], optional = true }
+rand = { version = "0.8", optional = true }
+sha1 = { version = "0.10", optional = true }
+style = { package = "stylo", version = "0.19", optional = true }
+ttf-parser = { version = "0.25", optional = true }
+woff = { version = "0.6.3", optional = true }
+write-fonts = { version = "0.51", features = ["read"], optional = true }
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "download-binaries", "tls-native", "copy-dylibs", "api-24"], optional = true }

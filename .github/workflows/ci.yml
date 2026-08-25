@@ -1,0 +1,42 @@
+name: Core CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_HTTP_MULTIPLEXING: false
+  CARGO_NET_RETRY: 10
+
+jobs:
+  test:
+    name: Rust core
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          components: clippy,rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Lint without desktop font support
+        run: cargo clippy --locked --all-targets --no-default-features -- -D warnings
+
+      - name: Test platform-neutral EPUB engine
+        run: cargo test --locked --no-default-features
+
+      - name: Lint font and OCR implementation
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Test font and OCR implementation
+        run: cargo test --locked --all-features
