@@ -45,7 +45,7 @@ impl EpubWorkspace {
             let mut entry = archive
                 .by_index(index)
                 .map_err(|error| format!("读取 EPUB 成员失败: {error}"))?;
-            let name = normalize_member_path(entry.name())?;
+            let name = decode_zip_member_name(entry.name_raw(), entry.name())?;
             if name == "mimetype" {
                 first_is_mimetype = index == 0;
                 mimetype_stored = entry.compression() == CompressionMethod::Stored;
@@ -163,6 +163,16 @@ impl EpubWorkspace {
         );
         Ok(())
     }
+}
+
+/// Decode a ZIP member path.
+///
+/// OCF requires UTF-8 file names, but many EPUB producers omit ZIP language
+/// encoding flag bit 11. The `zip` crate then interprets the raw bytes as
+/// CP437, so CJK names no longer match percent-decoded OPF hrefs.
+fn decode_zip_member_name(raw_name: &[u8], fallback_name: &str) -> Result<String, String> {
+    let name = std::str::from_utf8(raw_name).unwrap_or(fallback_name);
+    normalize_member_path(name)
 }
 
 pub fn normalize_member_path(value: &str) -> Result<String, String> {
@@ -344,8 +354,15 @@ fn temporary_output_path(output_path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::{
-        add_tool_metadata, normalize_member_path, relative_member_path, resolve_reference,
+        add_tool_metadata, decode_zip_member_name, normalize_member_path, relative_member_path,
+        resolve_reference, EpubWorkspace,
     };
+    use std::{
+        fs,
+        io::{Cursor, Write},
+        time::{SystemTime, UNIX_EPOCH},
+    };
+    use zip::{write::SimpleFileOptions, CompressionMethod, ZipArchive, ZipWriter};
 
     #[test]
     fn member_paths_reject_parent_traversal() {
@@ -376,5 +393,123 @@ mod tests {
             add_tool_metadata(opf).unwrap(),
             "<metadata>\n    <meta name=\"cover\" content=\"cover.jpg\"/>\n    <meta name=\"generator\" content=\"Epub Tool\" />\n  </metadata>"
         );
+    }
+
+    #[test]
+    fn prefers_utf8_zip_names_when_the_language_encoding_flag_is_missing() {
+        assert_eq!(
+            decode_zip_member_name("OEBPS/Fonts/华文隶书.ttf".as_bytes(), "mojibake").unwrap(),
+            "OEBPS/Fonts/华文隶书.ttf"
+        );
+        assert_eq!(decode_zip_member_name(&[0x87], "ç").unwrap(), "ç");
+        assert_eq!(
+            resolve_reference(
+                "OEBPS/content.opf",
+                "Fonts/%E5%8D%8E%E6%96%87%E9%9A%B6%E4%B9%A6.ttf"
+            )
+            .unwrap(),
+            Some("OEBPS/Fonts/华文隶书.ttf".to_string())
+        );
+
+        let path = std::env::temp_dir().join(format!(
+            "epub-tool-zip-utf8-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&path).unwrap();
+        let epub_path = path.join("book.epub");
+        write_unflagged_cjk_font_epub(&epub_path);
+
+        let mut archive = ZipArchive::new(fs::File::open(&epub_path).unwrap()).unwrap();
+        let mut font_name = None;
+        let mut font_name_raw = None;
+        for index in 0..archive.len() {
+            let entry = archive.by_index(index).unwrap();
+            if entry.name_raw().ends_with("华文隶书.ttf".as_bytes()) {
+                font_name = Some(entry.name().to_string());
+                font_name_raw = Some(entry.name_raw().to_vec());
+                break;
+            }
+        }
+        assert_ne!(font_name.as_deref(), Some("OEBPS/Fonts/华文隶书.ttf"));
+        assert_eq!(
+            font_name_raw.as_deref(),
+            Some("OEBPS/Fonts/华文隶书.ttf".as_bytes())
+        );
+
+        let workspace = EpubWorkspace::load(&epub_path, |_| {}).unwrap();
+        assert!(workspace.members.contains_key("OEBPS/Fonts/华文隶书.ttf"));
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    fn write_unflagged_cjk_font_epub(path: &std::path::Path) {
+        let mut archive = ZipWriter::new(Cursor::new(Vec::new()));
+        archive
+            .start_file::<_, ()>(
+                "mimetype",
+                SimpleFileOptions::default().compression_method(CompressionMethod::Stored),
+            )
+            .unwrap();
+        archive.write_all(b"application/epub+zip").unwrap();
+        for (name, content) in [
+            (
+                "META-INF/container.xml",
+                r#"<?xml version="1.0"?><container><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#,
+            ),
+            (
+                "OEBPS/content.opf",
+                r#"<?xml version="1.0" encoding="UTF-8"?><package xmlns="http://www.idpf.org/2007/opf" version="2.0"><metadata/><manifest><item id="font" href="Fonts/%E5%8D%8E%E6%96%87%E9%9A%B6%E4%B9%A6.ttf" media-type="application/x-font-ttf"/></manifest><spine/></package>"#,
+            ),
+        ] {
+            archive
+                .start_file::<_, ()>(
+                    name,
+                    SimpleFileOptions::default().compression_method(CompressionMethod::Stored),
+                )
+                .unwrap();
+            archive.write_all(content.as_bytes()).unwrap();
+        }
+        archive
+            .start_file::<_, ()>(
+                "OEBPS/Fonts/华文隶书.ttf",
+                SimpleFileOptions::default().compression_method(CompressionMethod::Stored),
+            )
+            .unwrap();
+        archive.write_all(b"font-bytes").unwrap();
+        let cursor = archive.finish().unwrap();
+        let mut data = cursor.into_inner();
+        clear_zip_language_encoding_flag(&mut data, "OEBPS/Fonts/华文隶书.ttf");
+        fs::write(path, data).unwrap();
+    }
+
+    fn clear_zip_language_encoding_flag(data: &mut [u8], file_name: &str) {
+        let file_name = file_name.as_bytes();
+        patch_zip_flag(data, b"PK\x03\x04", 30, 6, file_name);
+        patch_zip_flag(data, b"PK\x01\x02", 46, 8, file_name);
+    }
+
+    fn patch_zip_flag(
+        data: &mut [u8],
+        signature: &[u8],
+        file_name_offset: usize,
+        flags_offset: usize,
+        file_name: &[u8],
+    ) {
+        let mut search = 0;
+        while search + signature.len() <= data.len() {
+            if data[search..].starts_with(signature) {
+                let name_at = search + file_name_offset;
+                if data.get(name_at..name_at + file_name.len()) == Some(file_name) {
+                    let flags_at = search + flags_offset;
+                    let flags = u16::from_le_bytes([data[flags_at], data[flags_at + 1]]);
+                    data[flags_at..flags_at + 2]
+                        .copy_from_slice(&(flags & !(1 << 11)).to_le_bytes());
+                }
+            }
+            search += 1;
+        }
     }
 }

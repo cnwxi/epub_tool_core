@@ -545,7 +545,7 @@ dependencies = [
 
 [[package]]
 name = "epub_tool_core"
-version = "26.8.25"
+version = "26.9.21"
 dependencies = [
  "blitz-dom",
  "blitz-html",

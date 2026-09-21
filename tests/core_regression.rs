@@ -208,6 +208,35 @@ fn remaining_epub_tasks_run_through_the_unified_core() {
     assert!(replaced_opf.contains("Images/cover.png"));
 }
 
+#[test]
+fn encrypts_epub_with_percent_encoded_cjk_font_and_unflagged_utf8_zip_name() {
+    let directory = TestDirectory::new("cjk-zip-utf8");
+    let input = directory.path().join("book.epub");
+    write_unflagged_cjk_font_epub(&input);
+
+    let (encrypted, encrypt_events) = run_task(
+        directory.path(),
+        "encrypt-cjk",
+        TaskType::EncryptEpub,
+        input,
+        TaskOptions::Empty,
+    );
+    assert_eq!(encrypted.status, "success");
+    assert_eq!(encrypted.summary.success, 1);
+    assert_event_contract(&encrypt_events, "encrypt-cjk");
+
+    let encrypted_path = directory.path().join("book_encrypt_epub.epub");
+    let (decrypted, decrypt_events) = run_task(
+        directory.path(),
+        "decrypt-cjk",
+        TaskType::DecryptEpub,
+        encrypted_path,
+        TaskOptions::Empty,
+    );
+    assert_eq!(decrypted.status, "success");
+    assert_event_contract(&decrypt_events, "decrypt-cjk");
+}
+
 fn run_task(
     directory: &Path,
     task_id: &str,
@@ -276,6 +305,85 @@ fn archive_members(path: &Path) -> Vec<String> {
     (0..archive.len())
         .map(|index| archive.by_index(index).unwrap().name().to_string())
         .collect()
+}
+
+fn write_unflagged_cjk_font_epub(path: &Path) {
+    write_test_epub(path);
+    let mut archive = ZipArchive::new(fs::File::open(path).unwrap()).unwrap();
+    let mut members = Vec::new();
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index).unwrap();
+        let name = String::from_utf8(entry.name_raw().to_vec())
+            .unwrap_or_else(|_| entry.name().to_string());
+        let mut data = Vec::new();
+        entry.read_to_end(&mut data).unwrap();
+        members.push((name, data));
+    }
+    drop(archive);
+
+    let font_href = "Fonts/%E5%8D%8E%E6%96%87%E9%9A%B6%E4%B9%A6.ttf";
+    let mut rebuilt = ZipWriter::new(Cursor::new(Vec::new()));
+    for (name, data) in &members {
+        let compression = if name == "mimetype" {
+            CompressionMethod::Stored
+        } else {
+            CompressionMethod::Deflated
+        };
+        rebuilt
+            .start_file::<_, ()>(
+                name,
+                SimpleFileOptions::default().compression_method(compression),
+            )
+            .unwrap();
+        if name.ends_with("package.opf") {
+            let opf = String::from_utf8(data.clone()).unwrap().replace(
+                r#"<item id="toc" href="toc.ncx" media-type="application/x-dtbncx+xml"/>"#,
+                &format!(
+                    r#"<item id="font" href="{font_href}" media-type="application/x-font-ttf"/><item id="toc" href="toc.ncx" media-type="application/x-dtbncx+xml"/>"#
+                ),
+            );
+            rebuilt.write_all(opf.as_bytes()).unwrap();
+        } else {
+            rebuilt.write_all(data).unwrap();
+        }
+    }
+    rebuilt
+        .start_file::<_, ()>(
+            "OPS/Fonts/华文隶书.ttf",
+            SimpleFileOptions::default().compression_method(CompressionMethod::Stored),
+        )
+        .unwrap();
+    rebuilt.write_all(b"font-bytes").unwrap();
+    let mut data = rebuilt.finish().unwrap().into_inner();
+    clear_zip_language_encoding_flag(&mut data, "OPS/Fonts/华文隶书.ttf");
+    fs::write(path, data).unwrap();
+}
+
+fn clear_zip_language_encoding_flag(data: &mut [u8], file_name: &str) {
+    let file_name = file_name.as_bytes();
+    patch_zip_flag(data, b"PK\x03\x04", 30, 6, file_name);
+    patch_zip_flag(data, b"PK\x01\x02", 46, 8, file_name);
+}
+
+fn patch_zip_flag(
+    data: &mut [u8],
+    signature: &[u8],
+    file_name_offset: usize,
+    flags_offset: usize,
+    file_name: &[u8],
+) {
+    let mut search = 0;
+    while search + signature.len() <= data.len() {
+        if data[search..].starts_with(signature) {
+            let name_at = search + file_name_offset;
+            if data.get(name_at..name_at + file_name.len()) == Some(file_name) {
+                let flags_at = search + flags_offset;
+                let flags = u16::from_le_bytes([data[flags_at], data[flags_at + 1]]);
+                data[flags_at..flags_at + 2].copy_from_slice(&(flags & !(1 << 11)).to_le_bytes());
+            }
+        }
+        search += 1;
+    }
 }
 
 fn write_test_epub(path: &Path) {
